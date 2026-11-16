@@ -1,0 +1,24 @@
+_min_copier_version: "9.0.0"
+
+project_slug:
+  type: str
+  help: "URL path & systemd identifier (lowercase letters, digits, hyphens)"
+  default: "my-microapp"
+
+project_name:
+  type: str
+  help: "Human-readable project title"
+  default: "My MicroApp"
+
+mode:
+  type: str
+  help: "Deployment shape"
+  choices:
+    - fullstack
+    - static
+  default: fullstack
+
+api_port:
+  type: int
+  help: "Localhost loopback port reserved in 3300-3399"
+  default: 3302

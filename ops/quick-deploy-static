@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "Usage: quick-deploy-static <slug> <source-dir-or-html-file> [--public] [--spa]" >&2
+  exit 1
+}
+
+[ "$#" -ge 2 ] || usage
+
+SLUG="$1"
+SRC="$2"
+shift 2
+
+PUBLIC=0
+SPA=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --public) PUBLIC=1 ;;
+    --spa) SPA=1 ;;
+    *) usage ;;
+  esac
+  shift
+done
+
+if ! [[ "$SLUG" =~ ^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]?$ ]]; then
+  echo "Invalid slug: $SLUG (use lowercase alphanumeric + hyphen)" >&2
+  exit 1
+fi
+
+case "$SLUG" in
+  api|docs|notes|tools|bookmarks|library|about|inbox|organize|drafts|media|login|logout|pagefind|_astro|assets)
+    echo "Slug '$SLUG' is reserved." >&2
+    exit 1
+    ;;
+esac
+
+[ -e "$SRC" ] || { echo "Source not found: $SRC" >&2; exit 1; }
+
+DEST="/opt/apps/sites/$SLUG"
+TMP_DEST="/opt/apps/sites/.staging-$SLUG-$$"
+CONF="/etc/nginx/apps.d/$SLUG.conf"
+CONF_BAK=""
+[ -f "$CONF" ] && CONF_BAK="$(mktemp)" && cp -a "$CONF" "$CONF_BAK"
+
+cleanup() {
+  rm -rf "$TMP_DEST"
+  if [ -n "$CONF_BAK" ]; then rm -f "$CONF_BAK"; fi
+}
+trap cleanup EXIT
+
+mkdir -p /opt/apps/sites /etc/nginx/apps.d "$TMP_DEST"
+if [ -f "$SRC" ]; then
+  cp -a "$SRC" "$TMP_DEST/index.html"
+elif [ -d "$SRC" ]; then
+  cp -a "$SRC"/. "$TMP_DEST/"
+else
+  echo "Unsupported source type: $SRC" >&2
+  exit 1
+fi
+
+rm -rf "$DEST"
+mv "$TMP_DEST" "$DEST"
+
+if [ "$SPA" -eq 1 ]; then
+  TRY_LINE="    try_files \$uri \$uri/ /$SLUG/index.html;"
+else
+  TRY_LINE="    try_files \$uri \$uri/ =404;"
+fi
+
+if [ "$PUBLIC" -eq 1 ]; then
+  HEADER_LINES='    add_header X-Content-Type-Options "nosniff" always;'
+else
+  HEADER_LINES='    add_header X-Robots-Tag "noindex, nofollow" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header Cache-Control "no-store" always;'
+fi
+
+cat > "$CONF" <<NGINX
+location = /$SLUG {
+    return 301 /$SLUG/;
+}
+location ^~ /$SLUG/ {
+    root /opt/apps/sites;
+    index index.html;
+$TRY_LINE
+$HEADER_LINES
+}
+NGINX
+
+if ! nginx -t; then
+  if [ -n "$CONF_BAK" ]; then
+    cp -a "$CONF_BAK" "$CONF"
+  else
+    rm -f "$CONF"
+  fi
+  echo "nginx -t failed; reverted $CONF" >&2
+  exit 1
+fi
+
+systemctl reload nginx
+echo "Deployed static app '$SLUG' -> /$SLUG/"

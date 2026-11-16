@@ -1,0 +1,25 @@
+# Phase 2/3 示例：Kamal 2 零停机部署配置（仅 SSH + Docker，无需重量级控制面板）
+# 使用前提：本地安装 kamal，并在目标机预装 Docker
+
+service: microapp-demo
+image: ghcr.io/your-org/microapp-demo
+
+servers:
+  web:
+    - 203.0.113.10
+
+proxy:
+  ssl: true
+  host: app.example.com
+  healthcheck:
+    path: /api/health
+    interval: 3
+
+env:
+  clear:
+    PORT: "3000"
+  secret:
+    - APP_API_SECRET
+
+volumes:
+  - /opt/apps/services/microapp-demo/data:/app/server/data

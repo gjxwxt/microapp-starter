@@ -1,0 +1,18 @@
+{
+  "slug": "microapp-demo",
+  "name": "MicroApp Starter",
+  "mode": "fullstack",
+  "public": false,
+  "spa": false,
+  "frontend": {
+    "buildCommand": "pnpm build",
+    "distDir": "dist"
+  },
+  "backend": {
+    "serviceName": "microapp-demo-api",
+    "dir": "server",
+    "port": 3302,
+    "healthPath": "/health",
+    "secretEnvKey": "APP_API_SECRET"
+  }
+}

@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: quick-deploy-api <service-name> <source-dir> <mount-slug> <port> [--health <path>] [--secret-env <KEY>]
+EOF
+  exit 1
+}
+
+[ "$#" -ge 4 ] || usage
+
+SERVICE_NAME="$1"
+SRC_DIR="$2"
+MOUNT_SLUG="$3"
+PORT="$4"
+shift 4
+
+HEALTH_PATH="/health"
+SECRET_ENV=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --health)
+      HEALTH_PATH="${2:-/health}"
+      shift 2
+      ;;
+    --secret-env)
+      SECRET_ENV="${2:-}"
+      shift 2
+      ;;
+    *)
+      usage
+      ;;
+  esac
+done
+
+if ! [[ "$SERVICE_NAME" =~ ^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]?$ ]]; then
+  echo "Invalid service name: $SERVICE_NAME" >&2
+  exit 1
+fi
+if ! [[ "$MOUNT_SLUG" =~ ^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]?$ ]]; then
+  echo "Invalid mount slug: $MOUNT_SLUG" >&2
+  exit 1
+fi
+if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1024 ] || [ "$PORT" -gt 65535 ]; then
+  echo "Invalid port: $PORT" >&2
+  exit 1
+fi
+[ -d "$SRC_DIR" ] || { echo "Source directory not found: $SRC_DIR" >&2; exit 1; }
+[ -f "$SRC_DIR/start.sh" ] || { echo "Missing required $SRC_DIR/start.sh" >&2; exit 1; }
+
+APP_DIR="/opt/apps/services/$SERVICE_NAME"
+TMP_DIR="/opt/apps/services/.staging-$SERVICE_NAME-$$"
+CONF="/etc/nginx/apps.d/${MOUNT_SLUG}-api.conf"
+CONF_BAK=""
+[ -f "$CONF" ] && CONF_BAK="$(mktemp)" && cp -a "$CONF" "$CONF_BAK"
+
+cleanup() {
+  rm -rf "$TMP_DIR"
+  if [ -n "$CONF_BAK" ]; then rm -f "$CONF_BAK"; fi
+}
+trap cleanup EXIT
+
+mkdir -p /opt/apps/services /etc/nginx/apps.d "$TMP_DIR"
+cp -a "$SRC_DIR"/. "$TMP_DIR/"
+
+# Preserve runtime state (.env and data/) across atomic releases
+if [ -d "$APP_DIR/data" ]; then
+  rm -rf "$TMP_DIR/data"
+  cp -a "$APP_DIR/data" "$TMP_DIR/data"
+else
+  mkdir -p "$TMP_DIR/data"
+fi
+
+if [ -f "$APP_DIR/.env" ]; then
+  cp -a "$APP_DIR/.env" "$TMP_DIR/.env"
+else
+  touch "$TMP_DIR/.env"
+fi
+chmod 600 "$TMP_DIR/.env"
+
+# Ensure PORT matches target deployment port
+if grep -q '^PORT=' "$TMP_DIR/.env"; then
+  sed -i.bak "s/^PORT=.*/PORT=$PORT/" "$TMP_DIR/.env" && rm -f "$TMP_DIR/.env.bak"
+else
+  printf 'PORT=%s\n' "$PORT" >> "$TMP_DIR/.env"
+fi
+
+# Generate persistent secret key if requested and absent
+if [ -n "$SECRET_ENV" ] && ! grep -q "^${SECRET_ENV}=" "$TMP_DIR/.env"; then
+  SECRET_VAL="$(python3 -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null || openssl rand -hex 32)"
+  printf '%s=%s\n' "$SECRET_ENV" "$SECRET_VAL" >> "$TMP_DIR/.env"
+fi
+
+chmod +x "$TMP_DIR/start.sh"
+find "$TMP_DIR" -maxdepth 2 -name "*.py" -exec chmod +x {} + 2>/dev/null || true
+
+rm -rf "$APP_DIR"
+mv "$TMP_DIR" "$APP_DIR"
+
+cat > "$CONF" <<NGINX
+location ^~ /${MOUNT_SLUG}/api/ {
+    proxy_pass http://127.0.0.1:${PORT}/;
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    add_header Cache-Control "no-store" always;
+    add_header X-Content-Type-Options "nosniff" always;
+}
+NGINX
+
+if ! nginx -t; then
+  if [ -n "$CONF_BAK" ]; then
+    cp -a "$CONF_BAK" "$CONF"
+  else
+    rm -f "$CONF"
+  fi
+  echo "nginx -t failed; reverted $CONF" >&2
+  exit 1
+fi
+
+systemctl daemon-reload
+systemctl enable "quickapp@${SERVICE_NAME}" >/dev/null
+systemctl restart "quickapp@${SERVICE_NAME}"
+
+HEALTH_OK=0
+for _ in $(seq 1 20); do
+  if curl -sf "http://127.0.0.1:${PORT}${HEALTH_PATH}" >/dev/null 2>&1; then
+    HEALTH_OK=1
+    break
+  fi
+  sleep 0.3
+done
+
+if [ "$HEALTH_OK" -ne 1 ]; then
+  echo "Health check failed on http://127.0.0.1:${PORT}${HEALTH_PATH}" >&2
+  journalctl -u "quickapp@${SERVICE_NAME}" -n 30 --no-pager >&2 || true
+  exit 1
+fi
+
+systemctl reload nginx
+
+if [ -f /opt/apps/REGISTRY.md ] && ! grep -q "\`${SERVICE_NAME}\`" /opt/apps/REGISTRY.md; then
+  printf '\n- `:%s` `%s` (`quickapp@%s`): mounted at `/%s/api/`\n' \
+    "$PORT" "$SERVICE_NAME" "$SERVICE_NAME" "$MOUNT_SLUG" >> /opt/apps/REGISTRY.md
+fi
+
+echo "Deployed API service '$SERVICE_NAME' on 127.0.0.1:$PORT -> /${MOUNT_SLUG}/api/"

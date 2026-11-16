@@ -1,0 +1,23 @@
+node_modules/
+dist/
+.vite/
+coverage/
+
+# Local deployment secrets & overrides
+.env
+.env.*
+!.env.deploy.example
+
+# Python / SQLite local artifacts
+__pycache__/
+*.py[cod]
+*.db
+*.db-wal
+*.db-shm
+server/data/
+
+# OS & temp
+.work/
+.DS_Store
+*.log
+*.tsbuildinfo

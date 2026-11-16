@@ -1,0 +1,14 @@
+# Phase 2 示例：绑定独立域名后用 Caddy 替代手写 Nginx + Certbot（自动 HTTPS）
+# 适合挂载在任意一台云主机或作为多服务统一入口
+
+app.example.com {
+    encode gzip zstd
+
+    handle_path /api/* {
+        reverse_proxy 127.0.0.1:3302
+    }
+
+    root * /opt/apps/sites/microapp-demo
+    try_files {path} /index.html
+    file_server
+}
